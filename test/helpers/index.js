@@ -62,6 +62,7 @@ function pack(source, chokidar, runtime, testing) {
     isIBMi: runtime.isIBMi,
     isMacos: runtime.isMacos,
     isWindows: runtime.isWindows,
+    systemScheduler: runtime.systemScheduler,
     backendTesting: testing.backendTesting,
     internals: testing.inspectWatcher
   }

@@ -41,6 +41,10 @@
     "path": {
       "bare": "bare-path",
       "default": "path"
+    },
+    "timers": {
+      "bare": "./lib/bare-timers.js",
+      "default": "timers"
     }
   },
   "files": [

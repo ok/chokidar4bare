@@ -3487,4 +3487,77 @@ s.test('race regressions › should watch a deleted root directory for its retur
   await h.waitFor([[addSpy, 1, [after]]])
 })
 
+s.test(
+  'lifecycle and policy ownership › should unref system timers for a non-persistent watcher',
+  async (t, h) => {
+    const { chokidar, EV, internals, systemScheduler } = h
+    const timers = []
+    const scheduler = {
+      ...systemScheduler,
+      setTimeout: (cb, delay) => {
+        const timer = systemScheduler.setTimeout(cb, delay)
+        timers.push(timer)
+        return timer
+      }
+    }
+    const watcher = new chokidar.FSWatcher({ atomic: 100, persistent: false }, scheduler)
+    h.WATCHERS.push(watcher)
+
+    await internals(watcher).emitEvent(EV.UNLINK, 'non-persistent.txt')
+
+    t.is(timers.length, 1)
+    t.is(timers[0].hasRef(), false)
+  }
+)
+
+s.test(
+  'recursive native reconciliation › should watch a directory symlink that replaces a tracked file',
+  { skip: isIBMi },
+  async (t, h) => {
+    const { chokidar, EV, internals } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    const target = sp.join(h.FIXTURES_PATH, `file-link-target-${h.testId}`)
+    const link = h.dpath('file-to-link')
+    const child = sp.join(link, 'child.txt')
+    await h.mkdir(target, { recursive: true })
+    await write(sp.join(target, 'child.txt'), 'child')
+    await write(link, 'original')
+    const watcher = new chokidar.FSWatcher({
+      backend: 'native-recursive',
+      followSymlinks: true,
+      ignoreInitial: true,
+      atomic: false
+    })
+    h.WATCHERS.push(watcher)
+    internals(watcher).directoryEntry(h.currentDir).add(sp.basename(link))
+    internals(watcher).recordObserved(link, await lstat(link), 'add', undefined, true)
+    internals(watcher).tree.clearInitialCreates(h.currentDir)
+    const allSpy = h.createSpy()
+    watcher.on(EV.ALL, allSpy)
+
+    try {
+      await unlink(link)
+      await symlink(target, link, isWindows ? 'junction' : undefined)
+      const helper = internals(watcher).createHelper(h.currentDir)
+      helper.recursiveRoot = h.currentDir
+      await internals(watcher).handler.reconcileNativeTrigger(h.currentDir, helper, {
+        kind: 'native',
+        resource: sp.resolve(h.currentDir),
+        rawEvent: 'rename',
+        relativePath: sp.basename(link),
+        sequence: 1,
+        observedAt: Date.now()
+      })
+      await internals(watcher).drainTasks()
+
+      t.is(h.getCallsWith(allSpy, [EV.ADD_DIR, link]).length, 1)
+      t.is(h.getCallsWith(allSpy, [EV.ADD, child]).length, 1)
+      t.is(internals(watcher).directoryEntry(link).has('child.txt'), true)
+    } finally {
+      await watcher.close()
+      await h.rmr(target)
+    }
+  }
+)
+
 s.run()
