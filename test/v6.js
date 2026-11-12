@@ -1532,7 +1532,7 @@ s.test(
 // recursive native reconciliation
 
 s.test(
-  'recursive native reconciliation › should collapse one native write burst and retain a later write',
+  'recursive native reconciliation › should collapse a native write echo but report a differing write in its window',
   async (t, h) => {
     const { chokidar, EV, internals } = h
     await h.mkdir(h.currentDir, { recursive: true })
@@ -1561,16 +1561,28 @@ s.test(
       observedAt: scheduler.now()
     })
 
+    const lastSize = () => spy.calls.at(-1)?.[1]?.size
+
     await write(file, 'one phase')
     await internals(watcher).handler.reconcileNativeTrigger(root, helper, trigger(1))
+    t.is(spy.callCount, 1)
+    // The second phase lands after the first stat, inside the echo window:
+    // it is a real write and must reach the change window, not be dropped.
     await write(file, 'one write, final phase')
     await internals(watcher).handler.reconcileNativeTrigger(root, helper, trigger(2))
-    scheduler.advanceBy(50)
-    t.is(spy.callCount, 1)
-
-    await write(file, 'a distinct later write')
+    // A callback confirming the same stat fact is a pure echo.
     await internals(watcher).handler.reconcileNativeTrigger(root, helper, trigger(3))
+    t.is(spy.callCount, 1)
+    scheduler.advanceBy(50)
     t.is(spy.callCount, 2)
+    t.is(lastSize(), 'one write, final phase'.length)
+
+    // A different length keeps the fact distinct under coarse mtime granularity.
+    await write(file, 'a distinct and longer later write')
+    await internals(watcher).handler.reconcileNativeTrigger(root, helper, trigger(4))
+    scheduler.advanceBy(50)
+    t.is(spy.callCount, 3)
+    t.is(lastSize(), 'a distinct and longer later write'.length)
   }
 )
 
