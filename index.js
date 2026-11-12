@@ -627,6 +627,17 @@ class FSWatcher extends EventEmitter {
   }
 
   /**
+   * Replaces every watch keyed at `path` with a wait from its nearest existing
+   * ancestor, so the path is reported again when it reappears.
+   * @internal
+   */
+  rewatchMissingPath(path) {
+    if (this.closed || this.isUnwatched(path)) return
+    this.closePath(path)
+    this.lifecycle.track(this.handler.addRoot(path, false, this.capturePathGeneration()))
+  }
+
+  /**
    * Closes all watchers for a path
    */
   closePath(path, recursive = false) {

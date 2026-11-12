@@ -150,3 +150,19 @@ test('read-dir: validation matches readdirp', async (t) => {
   await t.exception.all(() => readDir(42), /must be a string/)
   await t.exception(() => readDir('.', { type: 'bogus' }), /Invalid type/)
 })
+
+test('pause() holds entries until resume(), like a paused Readable', async (t) => {
+  const root = await fixture(t)
+  const stream = readDir(root, { type: 'all' })
+  stream.pause()
+  t.is(stream.isPaused(), true)
+  const done = collect(stream)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  let seen = 0
+  stream.on('data', () => seen++)
+  t.is(seen, 0, 'nothing is emitted while paused')
+  stream.resume()
+  const events = await done
+  t.is(events.filter(([e]) => e === 'data').length, 5)
+  t.alike(events.slice(-2), [['end'], ['close']])
+})

@@ -2978,4 +2978,432 @@ s.test(
   }
 )
 
+s.test(
+  'platform regressions › should not open exact target fallbacks for macOS sockets (#1391)',
+  { skip: !isMacos },
+  async (t, h) => {
+    const { EV, backendTesting } = h
+    const net = isBare ? require('bare-net') : require('net')
+    await h.mkdir(h.currentDir, { recursive: true })
+    const socketPath = h.dpath('exact-fallback.sock')
+    const server = net.createServer()
+    await new Promise((resolve) => server.listen(socketPath, resolve))
+    const opened = []
+    backendTesting.setNativeWatchFactory((path, options, listener) => {
+      opened.push(path)
+      return fs.watch(path, options, listener)
+    })
+    try {
+      const watcher = h.cwatch(socketPath, { backend: 'native' })
+      const errorSpy = h.createSpy()
+      watcher.on(EV.ERROR, errorSpy)
+      await h.waitForWatcher(watcher)
+      await watcher.close()
+      t.alike(errorSpy.calls, [])
+      t.alike(opened, [sp.dirname(sp.resolve(socketPath))])
+    } finally {
+      backendTesting.setNativeWatchFactory()
+      await new Promise((resolve) => server.close(resolve))
+    }
+  }
+)
+
+s.test(
+  'race regressions › should not adopt siblings when a watched missing file flickers',
+  async (t, h) => {
+    const { EV } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    await write(h.dpath('sibling-a.txt'), 'a')
+    await write(h.dpath('sibling-b.txt'), 'b')
+    const missing = h.dpath('flicker.txt')
+    const watcher = h.cwatch(missing, { backend: 'native', ignoreInitial: true, atomic: false })
+    await h.waitForWatcher(watcher)
+    const allSpy = h.createSpy()
+    watcher.on(EV.ALL, allSpy)
+
+    fs.writeFileSync(missing, 'x')
+    fs.unlinkSync(missing)
+    await h.delay(300)
+
+    t.alike(
+      allSpy.calls.filter(([, path]) => path !== missing),
+      []
+    )
+  }
+)
+
+s.test('race regressions › should watch a parent added after a missing child', async (t, h) => {
+  const { EV, internals } = h
+  await h.mkdir(h.currentDir, { recursive: true })
+  const watcher = h.cwatch(h.dpath('not-yet.txt'), {
+    backend: 'native',
+    ignoreInitial: true,
+    atomic: false
+  })
+  await h.waitForWatcher(watcher)
+  watcher.add(h.currentDir)
+  await internals(watcher).drainTasks()
+  const addSpy = h.createSpy()
+  watcher.on(EV.ADD, addSpy)
+
+  const other = h.dpath('other.txt')
+  await write(other, 'other')
+  await h.waitFor([[addSpy, 1, [other]]])
+})
+
+s.test(
+  'race regressions › should keep waiting for a missing root after its parent is replaced',
+  async (t, h) => {
+    const { EV } = h
+    await h.mkdir(h.dpath('holder'), { recursive: true })
+    const missing = h.dpath('holder/eventually.txt')
+    const watcher = h.cwatch(missing, { backend: 'native', ignoreInitial: true, atomic: false })
+    await h.waitForWatcher(watcher)
+    const addSpy = h.createSpy()
+    watcher.on(EV.ADD, addSpy)
+
+    await h.rmr(h.dpath('holder'))
+    await h.delay(200)
+    await h.mkdir(h.dpath('holder'))
+    await write(missing, 'finally')
+    await h.waitFor([[addSpy, 1, [missing]]])
+  }
+)
+
+s.test(
+  'race regressions › should replace a subdirectory deleted and recreated before its callbacks run',
+  async (t, h) => {
+    const { EV } = h
+    await h.mkdir(h.dpath('replaced'), { recursive: true })
+    await write(h.dpath('replaced/old.txt'), 'old')
+    const watcher = h.cwatch(h.currentDir, {
+      backend: 'native',
+      ignoreInitial: true,
+      atomic: false
+    })
+    await h.waitForWatcher(watcher)
+    const addSpy = h.createSpy()
+    watcher.on(EV.ADD, addSpy)
+
+    // Synchronously, so the replacement outpaces the deletion callbacks.
+    fs.rmSync(h.dpath('replaced'), { recursive: true })
+    fs.mkdirSync(h.dpath('replaced'))
+    await h.delay(200)
+    const added = h.dpath('replaced/new.txt')
+    await write(added, 'new')
+    await h.waitFor([[addSpy, 1, [added]]])
+  }
+)
+
+s.test(
+  'race regressions › should not unlink an entry added after a rescan listed its directory',
+  async (t, h) => {
+    const { chokidar, EV, internals } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    await write(h.dpath('listed.txt'), 'listed')
+    const watcher = new chokidar.FSWatcher({ backend: 'native', atomic: false })
+    h.WATCHERS.push(watcher)
+    const dir = h.currentDir
+    const state = internals(watcher)
+    state.directoryEntry(dir).add('listed.txt')
+    const createScanStream = watcher.createScanStream.bind(watcher)
+    let paused
+    watcher.createScanStream = (root, options) => {
+      paused = createScanStream(root, options)
+      paused?.pause()
+      return paused
+    }
+    const unlinkSpy = h.createSpy()
+    watcher.on(EV.UNLINK, unlinkSpy)
+
+    const scanning = state.handler.readDirectory(
+      dir,
+      false,
+      state.createHelper(dir),
+      undefined,
+      dir,
+      0
+    )
+    await h.delay(50) // the listing has been taken
+    const late = h.dpath('late.txt')
+    await write(late, 'late')
+    // As the directory's own reconciliation queue would, concurrently.
+    state.handler.handleFile(late, await lstat(late), false, false)
+    paused.resume()
+    await scanning
+
+    t.is(unlinkSpy.callCount, 0)
+    t.is(state.directoryEntry(dir).has('late.txt'), true)
+  }
+)
+
+s.test(
+  'race regressions › should find files FSEvents dropped before the first directory callback',
+  { skip: !isMacos },
+  async (t, h) => {
+    const { chokidar, EV, backendTesting } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    const dir = sp.resolve(h.currentDir)
+    const nativeKey = (path) => rt.realpathNative(path)
+    const listeners = new Map()
+    backendTesting.setNativeWatchFactory((path, _options, listener) => {
+      listeners.set(nativeKey(path), listener)
+      return createFakeNativeWatcher()
+    })
+    const watcher = new chokidar.FSWatcher({
+      backend: 'native',
+      ignoreInitial: true,
+      atomic: false
+    })
+    h.WATCHERS.push(watcher)
+    const addSpy = h.createSpy()
+    watcher.on(EV.ADD, addSpy)
+
+    try {
+      watcher.add(h.currentDir)
+      await h.waitForWatcher(watcher)
+      // The stream dropped this creation; the next one is delivered.
+      const dropped = h.dpath('dropped.txt')
+      await write(dropped, 'dropped')
+      const delivered = h.dpath('delivered.txt')
+      await write(delivered, 'delivered')
+      listeners.get(nativeKey(dir))('rename', 'delivered.txt')
+      await h.waitFor([
+        [addSpy, 1, [delivered]],
+        [addSpy, 1, [dropped]]
+      ])
+    } finally {
+      await watcher.close()
+      backendTesting.setNativeWatchFactory()
+    }
+  }
+)
+
+s.test(
+  'race regressions › should replay invalidations that arrive during an overflow rescan',
+  async (t, h) => {
+    const { chokidar, EV, backendTesting } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    const dir = sp.resolve(h.currentDir)
+    const listeners = new Map()
+    // Windows hands the factory the native (realpath) spelling, which may differ from `dir`.
+    const nativeKey = (path) => rt.realpathNative(path)
+    backendTesting.setNativeWatchFactory((path, _options, listener) => {
+      listeners.set(nativeKey(path), listener)
+      return createFakeNativeWatcher()
+    })
+    const watcher = new chokidar.FSWatcher({
+      backend: 'native',
+      ignoreInitial: true,
+      atomic: false
+    })
+    h.WATCHERS.push(watcher)
+    const createScanStream = watcher.createScanStream.bind(watcher)
+    const scans = []
+    let scanned = () => {}
+    const nextScan = () =>
+      new Promise((resolve) => {
+        scanned = resolve
+      })
+    watcher.createScanStream = (root, options) => {
+      const stream = createScanStream(root, options)
+      if (stream && sp.resolve(root) === dir) {
+        stream.pause()
+        scans.push(stream)
+        scanned()
+      }
+      return stream
+    }
+    const addSpy = h.createSpy()
+    watcher.on(EV.ADD, addSpy)
+
+    try {
+      const ready = h.waitForWatcher(watcher)
+      let scan = nextScan()
+      watcher.add(h.currentDir)
+      await scan
+      const listener = listeners.get(nativeKey(dir))
+      for (let index = 0; index <= 1024; index++) listener('rename', `ghost-${index}.txt`)
+      scan = nextScan()
+      scans[0].resume()
+      await scan // the overflow rescan has taken its listing
+      await h.delay(50)
+      const late = h.dpath('late.txt')
+      await write(late, 'late')
+      listener('rename', 'late.txt')
+      scans[1].resume()
+      await ready
+
+      t.ok(h.calledWith(addSpy, [late]))
+    } finally {
+      await watcher.close()
+      backendTesting.setNativeWatchFactory()
+    }
+  }
+)
+
+s.test(
+  'race regressions › should subscribe nested directories after a recursive handle falls back',
+  { skip: !canUseRecursiveWatch },
+  async (t, h) => {
+    const { EV, backendTesting, internals } = h
+    await h.mkdir(h.dpath('nested/deeper'), { recursive: true })
+    const watcher = h.cwatch(h.currentDir, {
+      backend: 'native-recursive',
+      ignoreInitial: true,
+      atomic: false
+    })
+    await h.waitForWatcher(watcher)
+    if (internals(watcher).recursiveRoots.size === 0) return
+    const errorSpy = h.createSpy()
+    const addSpy = h.createSpy()
+    watcher.on(EV.ERROR, errorSpy).on(EV.ADD, addSpy)
+
+    const failure = Object.assign(new Error('simulated recursive failure'), { code: 'EIO' })
+    t.is(backendTesting.failRecursiveWatch(h.currentDir, failure), true)
+    await h.waitFor([errorSpy])
+    const nested = h.dpath('nested/inside.txt')
+    const deep = h.dpath('nested/deeper/inside.txt')
+    await write(nested, 'nested')
+    await write(deep, 'deep')
+    await h.waitFor([
+      [addSpy, 1, [nested]],
+      [addSpy, 1, [deep]]
+    ])
+  }
+)
+
+s.test(
+  'race regressions › should fall back when a recursive handle fails while replaying its initial buffer',
+  { skip: !canUseRecursiveWatch },
+  async (t, h) => {
+    const { chokidar, EV, backendTesting, internals } = h
+    await h.mkdir(h.dpath('replay/nested'), { recursive: true })
+    const watcher = new chokidar.FSWatcher({
+      backend: 'native-recursive',
+      ignoreInitial: true,
+      atomic: false
+    })
+    h.WATCHERS.push(watcher)
+    const handler = internals(watcher).handler
+    let publish
+    backendTesting.setRecursiveWatchFactory((_path, _options, listener) => {
+      publish = listener
+      return createFakeNativeWatcher()
+    })
+    const originalRead = handler.scanRecursiveTree.bind(handler)
+    const originalReconcile = handler.reconcileNativeTrigger.bind(handler)
+    let releaseRead = () => {}
+    let releaseReplay = () => {}
+    let readStarted
+    let replayStarted
+    const readBarrier = new Promise((resolve) => {
+      releaseRead = resolve
+    })
+    const replayBarrier = new Promise((resolve) => {
+      releaseReplay = resolve
+    })
+    const reading = new Promise((resolve) => {
+      readStarted = resolve
+    })
+    const replaying = new Promise((resolve) => {
+      replayStarted = resolve
+    })
+    let blockedRead = false
+    let blockedReplay = false
+    handler.scanRecursiveTree = async (...args) => {
+      if (!blockedRead) {
+        blockedRead = true
+        readStarted()
+        await readBarrier
+      }
+      return originalRead(...args)
+    }
+    handler.reconcileNativeTrigger = async (...args) => {
+      if (!blockedReplay) {
+        blockedReplay = true
+        replayStarted()
+        await replayBarrier
+      }
+      return originalReconcile(...args)
+    }
+    const errorSpy = h.createSpy()
+    const addSpy = h.createSpy()
+    watcher.on(EV.ERROR, errorSpy).on(EV.ADD, addSpy)
+    const ready = new Promise((resolve) => watcher.once(EV.READY, () => resolve()))
+
+    try {
+      watcher.add(h.currentDir)
+      await reading
+      publish('rename', 'replay')
+      releaseRead()
+      await replaying
+      const failure = Object.assign(new Error('failed during replay'), { code: 'EIO' })
+      t.is(backendTesting.failRecursiveWatch(h.currentDir, failure), true)
+      releaseReplay()
+      await ready
+
+      t.is(internals(watcher).recursiveRoots.size, 0)
+      t.ok(errorSpy.called)
+      const added = h.dpath('replay/nested/after.txt')
+      await write(added, 'after')
+      await h.waitFor([[addSpy, 1, [added]]])
+    } finally {
+      releaseRead()
+      releaseReplay()
+      await watcher.close()
+      backendTesting.setRecursiveWatchFactory()
+    }
+  }
+)
+
+s.test(
+  'race regressions › should reconcile the whole tree after a nameless recursive invalidation',
+  { skip: !canUseRecursiveWatch },
+  async (t, h) => {
+    const { chokidar, EV, backendTesting, internals } = h
+    const root = h.dpath('tree')
+    await h.mkdir(h.dpath('tree/sub'), { recursive: true })
+    await write(h.dpath('tree/sub/gone.txt'), 'gone')
+    await write(h.dpath('tree/sub/edited.txt'), 'before')
+    const watcher = new chokidar.FSWatcher({
+      backend: 'native-recursive',
+      ignoreInitial: true,
+      atomic: false
+    })
+    h.WATCHERS.push(watcher)
+    let publish
+    backendTesting.setRecursiveWatchFactory((_path, _options, listener) => {
+      publish = listener
+      return createFakeNativeWatcher()
+    })
+    const allSpy = h.createSpy()
+
+    try {
+      const ready = h.waitForWatcher(watcher)
+      watcher.add(root)
+      await ready
+      watcher.on(EV.ALL, allSpy)
+      await write(h.dpath('tree/sub/deep.txt'), 'deep')
+      await unlink(h.dpath('tree/sub/gone.txt'))
+      await write(h.dpath('tree/sub/edited.txt'), 'after, and longer')
+      // e.g. a ReadDirectoryChangesW buffer overflow reports no filename
+      publish('change', null)
+      await internals(watcher).drainTasks()
+
+      t.alike(
+        allSpy.calls.map(([event, path]) => `${event}:${sp.relative(root, path)}`).sort(),
+        [
+          `${EV.ADD}:${sp.join('sub', 'deep.txt')}`,
+          `${EV.CHANGE}:${sp.join('sub', 'edited.txt')}`,
+          `${EV.UNLINK}:${sp.join('sub', 'gone.txt')}`
+        ].sort()
+      )
+    } finally {
+      await watcher.close()
+      backendTesting.setRecursiveWatchFactory()
+    }
+  }
+)
+
 s.run()
