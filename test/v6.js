@@ -2759,4 +2759,223 @@ s.test(
   }
 )
 
+// chokidar 6.0.0: `nativeTrigger` is scoped to upstream's 'race regressions' describe.
+const nativeTrigger = (root, rawEvent, relativePath, observedAt) => ({
+  kind: 'native',
+  resource: root,
+  rawEvent,
+  relativePath,
+  sequence: observedAt,
+  observedAt
+})
+
+s.test(
+  'recursive native reconciliation › should report a truncate-then-write as one change with the written stats',
+  async (t, h) => {
+    const { chokidar, EV, internals } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    const file = h.dpath('truncated-write.txt')
+    await write(file, 'initial')
+    const scheduler = new VirtualScheduler()
+    const watcher = new chokidar.FSWatcher(
+      { backend: 'native-recursive', atomic: false },
+      scheduler
+    )
+    h.WATCHERS.push(watcher)
+    const root = sp.resolve(h.currentDir)
+    const helper = internals(watcher).createHelper(root)
+    helper.recursiveRoot = root
+    internals(watcher).directoryEntry(root).add(sp.basename(file))
+    internals(watcher).recordObserved(file, await lstat(file), 'add', undefined, true)
+    internals(watcher).tree.clearInitialCreates(root)
+    const spy = h.createSpy()
+    watcher.on(EV.CHANGE, spy)
+    const trigger = (sequence) => ({
+      kind: 'native',
+      resource: root,
+      rawEvent: 'change',
+      relativePath: sp.basename(file),
+      sequence,
+      observedAt: scheduler.now()
+    })
+    const lastSize = () => spy.calls.at(-1)?.[1]?.size
+
+    // As Windows on Node 22/24 reports writeFile: the truncation is stat'ed
+    // before the data lands, then the data write arrives.
+    await write(file, '')
+    await internals(watcher).handler.reconcileNativeTrigger(root, helper, trigger(1))
+    t.is(spy.callCount, 0)
+    await write(file, 'written data')
+    await internals(watcher).handler.reconcileNativeTrigger(root, helper, trigger(2))
+    // The data callback publishes at once, without waiting out the hold.
+    t.is(spy.callCount, 1)
+    t.is(lastSize(), 'written data'.length)
+    scheduler.advanceBy(60)
+    t.is(spy.callCount, 1)
+
+    // A file that really is emptied is still reported once the hold ends.
+    await write(file, '')
+    await internals(watcher).handler.reconcileNativeTrigger(root, helper, trigger(3))
+    t.is(spy.callCount, 1)
+    scheduler.advanceBy(10)
+    t.is(spy.callCount, 2)
+    t.is(lastSize(), 0)
+    scheduler.advanceBy(50)
+    t.is(spy.callCount, 2)
+  }
+)
+
+s.test(
+  'race regressions › should report a write that lands after the stat of a create',
+  async (t, h) => {
+    const { chokidar, EV, internals } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    const file = h.dpath('created-then-written.txt')
+    const watcher = new chokidar.FSWatcher({ backend: 'native', atomic: false })
+    h.WATCHERS.push(watcher)
+    const root = sp.resolve(h.currentDir)
+    const helper = internals(watcher).createHelper(root)
+    const allSpy = h.createSpy()
+    watcher.on(EV.ALL, allSpy)
+    const reconcile = (rawEvent, observedAt) =>
+      internals(watcher).handler.reconcileNativeTrigger(
+        root,
+        helper,
+        nativeTrigger(root, rawEvent, sp.basename(file), observedAt)
+      )
+
+    // Like `cmd > file`: the shell creates the file, the command writes later.
+    await write(file, '')
+    await reconcile('rename', 1000)
+    await write(file, 'output arrives later')
+    await reconcile('change', 1005)
+    // A further callback that confirms the same stat fact is still an echo.
+    await reconcile('change', 1006)
+
+    t.alike(
+      allSpy.calls.map(([event, path, stats]) => [event, path, stats?.size]),
+      [
+        [EV.ADD, file, 0],
+        [EV.CHANGE, file, 'output arrives later'.length]
+      ]
+    )
+  }
+)
+
+s.test(
+  'race regressions › should announce a file created empty with the data written right after',
+  async (t, h) => {
+    const { chokidar, EV, internals } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    const scheduler = new VirtualScheduler()
+    const watcher = new chokidar.FSWatcher({ backend: 'native', atomic: false }, scheduler)
+    h.WATCHERS.push(watcher)
+    watcher.readyEmitted = true
+    const root = sp.resolve(h.currentDir)
+    const helper = internals(watcher).createHelper(root)
+    const allSpy = h.createSpy()
+    watcher.on(EV.ALL, allSpy)
+    const events = () => allSpy.calls.map(([event, path, stats]) => [event, path, stats?.size])
+    const reconcile = (file, rawEvent, observedAt) =>
+      internals(watcher).handler.reconcileNativeTrigger(
+        root,
+        helper,
+        nativeTrigger(root, rawEvent, sp.basename(file), observedAt)
+      )
+
+    // writeFile on a new file: created empty, its data lands within the hold.
+    const quick = h.dpath('written-at-once.txt')
+    await write(quick, '')
+    await reconcile(quick, 'rename', 1000)
+    t.alike(events(), [])
+    await write(quick, 'data')
+    await reconcile(quick, 'change', 1002)
+    t.alike(events(), [[EV.ADD, quick, 4]])
+    scheduler.advanceBy(60)
+    t.alike(events(), [[EV.ADD, quick, 4]])
+
+    // Data that lands after the hold is a later write of an empty file.
+    const late = h.dpath('written-later.txt')
+    await write(late, '')
+    await reconcile(late, 'rename', 2000)
+    scheduler.advanceBy(10)
+    t.alike(events().slice(1), [[EV.ADD, late, 0]])
+    await write(late, 'later')
+    await reconcile(late, 'change', 2050)
+    t.alike(events().slice(1), [
+      [EV.ADD, late, 0],
+      [EV.CHANGE, late, 5]
+    ])
+  }
+)
+
+s.test(
+  'race regressions › should never leave a path suppressed by an orphaned awaitWriteFinish wait',
+  async (t, h) => {
+    const { chokidar, EV, internals } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    const file = h.dpath('orphaned-awf.txt')
+    await write(file, 'pending')
+    const scheduler = new VirtualScheduler()
+    const watcher = new chokidar.FSWatcher(
+      { atomic: false, awaitWriteFinish: { pollInterval: 10, stabilityThreshold: 30 } },
+      scheduler
+    )
+    h.WATCHERS.push(watcher)
+    internals(watcher).readyEmitted = true
+    const addSpy = h.createSpy()
+    watcher.on(EV.ADD, addSpy)
+    // A removal that does not cancel the wait (as the old 100 ms remove gate did).
+    watcher.removePath = () => {}
+
+    await internals(watcher).emitEvent(EV.ADD, file)
+    await unlink(file)
+    scheduler.advanceBy(10)
+    await internals(watcher).drainTasks()
+    t.is(internals(watcher).pendingWrites.size, 0)
+
+    await write(file, 'recreated')
+    await internals(watcher).emitEvent(EV.ADD, file)
+    for (let elapsed = 0; elapsed < 50; elapsed += 10) {
+      scheduler.advanceBy(10)
+      await internals(watcher).drainTasks()
+    }
+    t.is(h.getCallsWith(addSpy, [file]).length, 1)
+  }
+)
+
+s.test(
+  'race regressions › should not let an in-flight awaitWriteFinish stat adopt a newer wait',
+  async (t, h) => {
+    const { chokidar, EV, internals } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    const file = h.dpath('awf-generations.txt')
+    await write(file, 'value')
+    const scheduler = new VirtualScheduler()
+    const watcher = new chokidar.FSWatcher(
+      { atomic: false, awaitWriteFinish: { pollInterval: 10, stabilityThreshold: 30 } },
+      scheduler
+    )
+    h.WATCHERS.push(watcher)
+    const first = h.createSpy()
+    const second = h.createSpy()
+
+    internals(watcher).awaitWriteFinish(file, 30, EV.ADD, first)
+    scheduler.advanceBy(10) // the first wait's stat is now in flight
+    internals(watcher).events.cancelPath(file)
+    internals(watcher).awaitWriteFinish(file, 30, EV.CHANGE, second)
+    await internals(watcher).drainTasks()
+    t.is(scheduler.activeCount, 1)
+
+    for (let elapsed = 0; elapsed < 40; elapsed += 10) {
+      scheduler.advanceBy(10)
+      await internals(watcher).drainTasks()
+    }
+    t.is(first.callCount, 0)
+    t.is(second.callCount, 1)
+    t.is(internals(watcher).pendingWrites.size, 0)
+    t.is(scheduler.activeCount, 0)
+  }
+)
+
 s.run()
