@@ -46,7 +46,7 @@ s.test('B08 handle budget: 20 dirs × 50 files never cost a handle per file', as
 })
 
 s.test(
-  'B12 a watcher that closed itself before its error still yields one error and a clean registry',
+  'B12 a watcher that closed itself before its error yields one error and is re-established',
   async (t, h) => {
     // bare-fs's Watcher closes itself, then emits 'error'. Reproduce that sequence on a real
     // per-directory handle: close it ourselves, then emit the error it would have emitted.
@@ -71,7 +71,15 @@ s.test(
     await new Promise((resolve) => setTimeout(resolve, 100))
     t.is(count(events, 'error'), 1, 'exactly one error event')
     t.is(events.find(([e]) => e === 'error')[1].code, 'EPERM')
-    t.ok(facts().nativeWatches < before, 'the failed resource left the registry')
+    // chokidar 6.0.0: a retired handle is re-established (at most 3 times) and its path
+    // reconciled, so the registry holds a fresh handle instead of the failed one.
+    t.ok(created.length >= 2 && created.at(-1) !== handle, 'a fresh handle replaced the failed one')
+    t.is(facts().nativeWatches, before, 'the failed resource left the registry')
+    const addSpy = h.createSpy()
+    watcher.on('add', addSpy)
+    const file = path.join(h.currentDir, 'after-failure.txt')
+    fs.writeFileSync(file, 'after')
+    await h.waitFor([[addSpy, 1, [file]]])
     await watcher.close()
   }
 )

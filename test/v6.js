@@ -2733,4 +2733,30 @@ s.test(
   }
 )
 
+s.test(
+  'race regressions › should re-establish a native directory handle retired after a runtime error',
+  async (t, h) => {
+    const { EV, backendTesting } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    const watcher = h.cwatch(h.currentDir, {
+      backend: 'native',
+      ignoreInitial: true,
+      atomic: false
+    })
+    await h.waitForWatcher(watcher)
+    const errorSpy = h.createSpy()
+    const addSpy = h.createSpy()
+    watcher.on(EV.ERROR, errorSpy).on(EV.ADD, addSpy)
+
+    const failure = Object.assign(new Error('simulated native failure'), { code: 'EIO' })
+    t.is(await backendTesting.failNativeWatch(h.currentDir, failure), true)
+    t.is(errorSpy.callCount, 1)
+    t.ok(backendTesting.nativeResourceCount() >= 1)
+
+    const file = h.dpath('after-native-failure.txt')
+    await write(file, 'after')
+    await h.waitFor([[addSpy, 1, [file]]])
+  }
+)
+
 s.run()
