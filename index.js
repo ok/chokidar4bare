@@ -32,6 +32,7 @@ const { LifecycleScope, ReconciliationQueue, TreeState } = require('./lib/tree')
 
 const DOT_RE = /\..*\.(sw[px])$|~$|\.subl.*\.tmp/
 const WATCH_BACKENDS = new Set(['auto', 'native', 'native-recursive', 'polling'])
+const DEF_AWF = Object.freeze({ stabilityThreshold: 2000, pollInterval: 100 })
 
 function arrify(item) {
   return Array.isArray(item) ? item : [item]
@@ -93,30 +94,36 @@ function validateOptions(opts) {
  */
 class FSWatcher extends EventEmitter {
   options
+  /** @internal */
   lifecycle
+  /** @internal */
   tree
+  /** @internal */
   reconciliation
+  /** @internal */
   events
+  /** @internal */
+  scheduler
+  /** @internal */
+  handler
+  /** @internal */
+  readyEmitted
+  /** @internal */
+  streams
 
   get closed() {
     return this.lifecycle !== undefined && this.lifecycle.state !== 'OPEN'
   }
 
-  ignoredPaths
-  streams
-
-  pendingAdds
-  pathMutation
-  pathBarriers
-  closePromise
-  userIgnored
-  unwatchIgnored
-  readyEmitted
-  readyPending
-  readyScheduled
-  emitRaw
-  handler
-  scheduler
+  #ignoredPaths
+  #pendingAdds
+  #pathMutation
+  #pathBarriers
+  #closePromise
+  #userIgnored
+  #unwatchIgnored
+  #readyPending
+  #readyScheduled
 
   // Not indenting methods for history sake; for now.
   constructor(_opts = {}, scheduler = systemScheduler) {
@@ -126,18 +133,17 @@ class FSWatcher extends EventEmitter {
       throw new TypeError('backend must be auto, native, native-recursive, or polling')
     }
 
-    this.ignoredPaths = new Set()
+    this.#ignoredPaths = new Set()
     this.streams = new Set()
 
-    this.pendingAdds = new Map()
-    this.pathMutation = 0
-    this.pathBarriers = new Map()
+    this.#pendingAdds = new Map()
+    this.#pathMutation = 0
+    this.#pathBarriers = new Map()
     this.readyEmitted = false
-    this.readyPending = false
-    this.readyScheduled = false
+    this.#readyPending = false
+    this.#readyScheduled = false
     this.scheduler = scheduler
     const awf = _opts.awaitWriteFinish
-    const DEF_AWF = { stabilityThreshold: 2000, pollInterval: 100 }
     const opts = {
       ..._opts,
       // Defaults
@@ -162,7 +168,7 @@ class FSWatcher extends EventEmitter {
       ignored: Object.freeze(_opts.ignored ? arrify(_opts.ignored).map(cloneOwnedMatcher) : []),
       awaitWriteFinish:
         awf === true
-          ? Object.freeze({ ...DEF_AWF })
+          ? DEF_AWF
           : typeof awf === 'object'
             ? Object.freeze({ ...DEF_AWF, ...awf })
             : false
@@ -196,14 +202,10 @@ class FSWatcher extends EventEmitter {
     // Inspect the raw option so the merged default cannot hide an implicit choice.
     if (_opts.atomic === undefined) opts.atomic = !opts.usePolling
     validateOptions(opts)
-    this.emitRaw = (...args) => {
-      if (!this.closed) this.emit(EV.RAW, ...args)
-    }
-
     this.options = opts
     this.lifecycle = new LifecycleScope(
       () => {
-        if (this.readyPending) this.queueReady()
+        if (this.#readyPending) this.queueReady()
       },
       (error) => {
         if (!this.closed)
@@ -224,10 +226,6 @@ class FSWatcher extends EventEmitter {
       handleError: (error) => this.handleError(error),
       publish: (event, args) => this.emitWithAll(event, args)
     })
-    void this.emitRaw
-    void this.createHelper
-    void this.addPathCloser
-    void this.createScanStream
     this.handler = new ObservationEngine(this)
     // You’re frozen when your heart’s not open.
     Object.freeze(opts)
@@ -237,7 +235,7 @@ class FSWatcher extends EventEmitter {
     matcher = this.ignoredMatcher(matcher)
     if (isMatcherObject(matcher)) {
       // return early if we already have a deeply equal matcher object
-      for (const ignored of this.ignoredPaths) {
+      for (const ignored of this.#ignoredPaths) {
         if (
           isMatcherObject(ignored) &&
           ignored.path === matcher.path &&
@@ -248,26 +246,26 @@ class FSWatcher extends EventEmitter {
       }
     }
 
-    this.ignoredPaths.add(matcher)
-    this.unwatchIgnored = undefined
+    this.#ignoredPaths.add(matcher)
+    this.#unwatchIgnored = undefined
   }
 
   removeIgnoredPath(matcher) {
     matcher = this.ignoredMatcher(matcher)
-    this.ignoredPaths.delete(matcher)
+    this.#ignoredPaths.delete(matcher)
 
     // now find any matcher objects with the matcher as path
     if (typeof matcher === 'string') {
-      for (const ignored of this.ignoredPaths) {
+      for (const ignored of this.#ignoredPaths) {
         // TODO (43081j): make this more efficient.
         // probably just make a `this._ignoredDirectories` or some
         // such thing.
         if (isMatcherObject(ignored) && ignored.path === matcher) {
-          this.ignoredPaths.delete(ignored)
+          this.#ignoredPaths.delete(ignored)
         }
       }
     }
-    this.unwatchIgnored = undefined
+    this.#unwatchIgnored = undefined
   }
 
   ignoredMatcher(matcher) {
@@ -279,18 +277,18 @@ class FSWatcher extends EventEmitter {
   }
 
   capturePathGeneration() {
-    return this.pathMutation
+    return this.#pathMutation
   }
 
   invalidatePath(path) {
-    this.pathBarriers.set(logicalPathKey(path), ++this.pathMutation)
+    this.#pathBarriers.set(logicalPathKey(path), ++this.#pathMutation)
   }
 
   isPathGenerationActive(path, generation) {
     if (this.lifecycle.state !== 'OPEN') return false
-    if (this.pathBarriers.size === 0) return true
+    if (this.#pathBarriers.size === 0) return true
     const logicalKey = logicalPathKey(path)
-    for (const [barrier, barrierGeneration] of this.pathBarriers) {
+    for (const [barrier, barrierGeneration] of this.#pathBarriers) {
       if (barrierGeneration <= generation) continue
       if (isSameOrInside(barrier, logicalKey)) return false
     }
@@ -299,14 +297,14 @@ class FSWatcher extends EventEmitter {
 
   queueReady() {
     if (this.closed || this.readyEmitted) return
-    this.readyPending = true
-    if (this.lifecycle.tasks.size > 0 || this.readyScheduled) return
-    this.readyScheduled = true
+    this.#readyPending = true
+    if (this.lifecycle.tasks.size > 0 || this.#readyScheduled) return
+    this.#readyScheduled = true
     queueMicrotask(() => {
       // rt: S9
-      this.readyScheduled = false
+      this.#readyScheduled = false
       if (this.closed || this.readyEmitted || this.lifecycle.tasks.size > 0) return
-      this.readyPending = false
+      this.#readyPending = false
       this.readyEmitted = true
       this.emit(EV.READY)
     })
@@ -337,18 +335,18 @@ class FSWatcher extends EventEmitter {
       this.removeIgnoredPath(path)
     })
 
-    if (!this.readyEmitted) this.readyPending = true
+    if (!this.readyEmitted) this.#readyPending = true
     const addTask = Promise.all(
       paths.map(async (path) => {
         const key = logicalPathKey(path)
-        if (this.lifecycle.closers.has(key) || this.pendingAdds.has(key)) return
+        if (this.lifecycle.closers.has(key) || this.#pendingAdds.has(key)) return
         const pendingToken = Symbol(key)
         const pathGeneration = this.capturePathGeneration()
-        this.pendingAdds.set(key, pendingToken)
+        this.#pendingAdds.set(key, pendingToken)
         try {
           await this.handler.addRoot(path, true, pathGeneration)
         } finally {
-          if (this.pendingAdds.get(key) === pendingToken) this.pendingAdds.delete(key)
+          if (this.#pendingAdds.get(key) === pendingToken) this.#pendingAdds.delete(key)
         }
       })
     )
@@ -372,7 +370,7 @@ class FSWatcher extends EventEmitter {
       const isDirectory = this.tree.watched.has(key)
 
       this.invalidatePath(key)
-      this.pendingAdds.delete(key)
+      this.#pendingAdds.delete(key)
       this.events.cancelPath(key)
       this.closePath(key, isDirectory)
 
@@ -384,7 +382,7 @@ class FSWatcher extends EventEmitter {
         })
       }
 
-      this.unwatchIgnored = undefined
+      this.#unwatchIgnored = undefined
     })
 
     return this
@@ -394,32 +392,32 @@ class FSWatcher extends EventEmitter {
    * Close watchers and remove all listeners from watched paths.
    */
   close() {
-    if (this.closePromise) {
-      return this.closePromise
+    if (this.#closePromise) {
+      return this.#closePromise
     }
     const closers = this.lifecycle.beginClose()
 
     // Memory management.
     this.removeAllListeners()
     this.events.close()
-    this.pendingAdds.clear()
+    this.#pendingAdds.clear()
     this.streams.forEach((stream) => stream.destroy())
-    this.userIgnored = undefined
-    this.unwatchIgnored = undefined
+    this.#userIgnored = undefined
+    this.#unwatchIgnored = undefined
     this.readyEmitted = false
     this.tree.dispose()
-    this.pathBarriers.clear()
+    this.#pathBarriers.clear()
     this.streams.clear()
     this.reconciliation.clear()
 
-    this.closePromise = (async () => {
+    this.#closePromise = (async () => {
       const closerResults = await Promise.allSettled(closers)
       await this.lifecycle.drain()
       this.lifecycle.finishClose()
       const failed = closerResults.find((result) => result.status === 'rejected')
       if (failed) throw failed.reason
     })()
-    return this.closePromise
+    return this.#closePromise
   }
 
   /**
@@ -435,6 +433,11 @@ class FSWatcher extends EventEmitter {
       watchList[index] = entry.getChildren().sort()
     })
     return watchList
+  }
+
+  /** @internal */
+  emitRaw(...args) {
+    if (!this.closed) this.emit(EV.RAW, ...args)
   }
 
   emitWithAll(event, args) {
@@ -474,7 +477,7 @@ class FSWatcher extends EventEmitter {
    */
   isIgnored(path, stats) {
     if (this.options.atomic && DOT_RE.test(path)) return true
-    if (!this.userIgnored) {
+    if (!this.#userIgnored) {
       const { cwd } = this.options
       const ign = this.options.ignored
 
@@ -485,7 +488,7 @@ class FSWatcher extends EventEmitter {
       )
       const canonical = compileMatchers(pathMatchers)
       const pathAliases = new Map()
-      this.userIgnored = (candidate, candidateStats) => {
+      this.#userIgnored = (candidate, candidateStats) => {
         if (direct(candidate, candidateStats)) return true
         if (isWindows || pathMatchers.length === 0) return false
 
@@ -507,21 +510,21 @@ class FSWatcher extends EventEmitter {
         }
       }
     }
-    if (this.userIgnored(path, stats)) return true
-    if (this.ignoredPaths.size === 0) return false
-    if (!this.unwatchIgnored) {
-      this.unwatchIgnored = compileMatchers([...this.ignoredPaths])
+    if (this.#userIgnored(path, stats)) return true
+    if (this.#ignoredPaths.size === 0) return false
+    if (!this.#unwatchIgnored) {
+      this.#unwatchIgnored = compileMatchers([...this.#ignoredPaths])
     }
 
-    return this.unwatchIgnored(logicalPathKey(path), stats)
+    return this.#unwatchIgnored(logicalPathKey(path), stats)
   }
 
   isUnwatched(path) {
-    if (this.ignoredPaths.size === 0) return false
-    if (!this.unwatchIgnored) {
-      this.unwatchIgnored = compileMatchers([...this.ignoredPaths])
+    if (this.#ignoredPaths.size === 0) return false
+    if (!this.#unwatchIgnored) {
+      this.#unwatchIgnored = compileMatchers([...this.#ignoredPaths])
     }
-    return this.unwatchIgnored(logicalPathKey(path))
+    return this.#unwatchIgnored(logicalPathKey(path))
   }
 
   /**
@@ -650,7 +653,9 @@ class FSWatcher extends EventEmitter {
       this.reconciliation.forgetPending(
         (scope, candidate) => contains(scope) || contains(candidate)
       )
-      ;[...this.pendingAdds.keys()].filter(contains).forEach((key) => this.pendingAdds.delete(key))
+      ;[...this.#pendingAdds.keys()]
+        .filter(contains)
+        .forEach((key) => this.#pendingAdds.delete(key))
     }
     const dir = sp.dirname(logicalKey)
     this.removeTreeItem(dir, sp.basename(logicalKey))
