@@ -1,4 +1,4 @@
-// Port of chokidar src/index.test.ts @ 74adf65: the public API case and the shared suite
+// Port of chokidar src/index.test.ts @ e4021d8: the public API case and the shared suite
 // `runTests(baseopts)`, registered once per backend exactly as upstream registers it.
 'use strict'
 

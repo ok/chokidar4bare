@@ -1,7 +1,7 @@
 # Testing
 
 chokidar4bare's suites are chokidar v6's own suites, ported to brittle. They are the executable
-specification of the port: `test/v6.js` (74 cases), `test/index.js` (the 119-case shared suite run
+specification of the port: `test/v6.js` (96 cases), `test/index.js` (the 131-case shared suite run
 under the native, recursive-preferred and owned-polling backends), `test/architecture.js` (7
 cases), plus chokidar4bare's own `test/read-dir.js`, `test/inotify.js`, `test/enospc.js` and
 `test/smoke.js`.
@@ -14,7 +14,7 @@ the same `fs.watch` upstream runs on. That makes upstream's suite a differential
 ```
 # 1. the ported tests against the upstream chokidar build they were ported from
 git clone https://github.com/paulmillr/chokidar ../chokidar-upstream
-git -C ../chokidar-upstream checkout --detach 74adf65 && (cd ../chokidar-upstream && npm ci && npm run build)
+git -C ../chokidar-upstream checkout --detach e4021d8 && (cd ../chokidar-upstream && npm ci && npm run build)
 CHOKIDAR4BARE_ORACLE=$PWD/../chokidar-upstream npx brittle-node "test/*.js"
 
 # 2. the same tests against chokidar4bare on Node — the numbers must match step 1
@@ -37,7 +37,13 @@ Recorded numbers (2026-09-25, macOS arm64, Node 24.19, Bare 1.33.4):
 | `test/index.js`        | 359/359, 988       | 359/359, 988         | 359/359, 952                | 240/240, 641                |
 | `test/architecture.js` | 8/8, 35            | 8/8, 35              | 8/8, 35                     | 8/8, 35                     |
 
-On Linux under Bare the recursive-preferred label does not register (240 = 2 × 119 + 2): libuv
+Synced to chokidar 6.0.0 + #1496/#1505 (`e4021d8`), 2026-11-12, macOS arm64, Node 24.19, Bare
+1.33.4: `npm test` gives 539/539 under Node (1,502 asserts) and 539/539 under Bare (1,472 asserts);
+`test/v6.js` alone is 97/97 (316 asserts Node, 301 Bare). The oracle column has not been re-run at
+`e4021d8` yet, nor have Linux and Windows; the table above is the 0.1.0 baseline.
+
+On Linux under Bare the recursive-preferred label does not register (240 = 2 × 119 + 2 at 0.1.0;
+2 × 131 + 2 since 6.0.0): libuv
 ignores the recursive flag there and bare-fs cannot report it, so chokidar4bare pre-latches recursive
 as unsupported (DV11) and the harness's `canUseRecursiveWatch` says no.
 
@@ -65,6 +71,15 @@ both are verbatim upstream assertions with no macOS guard upstream either):
 - `fs.watch (non-polling) › watch individual files › should detect unlink and re-add`
 - `fs.watch (recursive preferred) › watch individual files › should detect safe-edit` (exact count
   of three `change` events for three rename-over saves 300 ms apart)
+
+Seen locally during the 6.0.0 sync on macOS (each once; all pass on immediate re-runs, 8 clean
+consecutive `test/index.js` runs across both runtimes afterwards; each waits on a single FSEvents
+callback shortly after a subscription starts, the drop the first-callback rescan only covers when a
+later callback arrives):
+
+- `fs.watch (non-polling) › watch a directory › should emit \`unlinkDir\` and \`add\` when dir is replaced by file` (Node)
+- `fs.watch (recursive preferred) › watch individual files › should not error on sockets (#1391)` (Bare)
+- `race regressions › should fall back when a recursive handle fails while replaying its initial buffer` (Bare)
 
 They are tracked here by name. A case that fails twice gets investigated, not re-run.
 

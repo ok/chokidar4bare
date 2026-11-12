@@ -1,4 +1,4 @@
-// Port of chokidar src/architecture.test.ts @ 74adf65 (130 lines). Pure unit tests on the internal
+// Port of chokidar src/architecture.test.ts @ e4021d8 (130 lines). Pure unit tests on the internal
 // modules (backend.js, runtime.js, tree.js) — no filesystem, no watcher instances — so they gain
 // nothing from a suite() case's fixture directory beyond the shared runner shape used everywhere
 // else in this port.

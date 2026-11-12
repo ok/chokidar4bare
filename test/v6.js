@@ -1,4 +1,4 @@
-// Port of chokidar src/v6.test.ts @ 74adf65 (registerV6Tests). Titles are `<describe> › <it>`.
+// Port of chokidar src/v6.test.ts @ e4021d8 (registerV6Tests). Titles are `<describe> › <it>`.
 const fs = require('fs')
 const {
   lstat,

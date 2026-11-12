@@ -1,4 +1,4 @@
-// Test harness. Mirrors the helpers of chokidar src/index.test.ts and src/v6.test.ts @ 74adf65
+// Test harness. Mirrors the helpers of chokidar src/index.test.ts and src/v6.test.ts @ e4021d8
 // (spies, waitFor, fixtures, VirtualScheduler) on top of brittle, and adds the oracle switch:
 // with CHOKIDAR4BARE_ORACLE set, the suites run against the upstream chokidar build they were ported
 // from, which is how the port is verified.
