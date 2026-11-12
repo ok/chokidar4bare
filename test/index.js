@@ -5,6 +5,7 @@
 const {
   appendFile,
   readFile: read,
+  realpath,
   rename,
   symlink,
   unlink,
@@ -2464,7 +2465,7 @@ function registerSharedSuite(s, baseopts, label) {
 
   s.test(title('getWatched', 'should return the watched paths'), async (t, h) => {
     const options = clean(h)
-    const expected = {}
+    const expected = Object.create(null)
     expected[sp.dirname(h.currentDir)] = [h.testId.toString()]
     expected[h.currentDir] = ['change.txt', 'unlink.txt']
     const watcher = h.cwatch(h.currentDir, options)
@@ -2477,11 +2478,11 @@ function registerSharedSuite(s, baseopts, label) {
     async (t, h) => {
       const options = clean(h)
       options.cwd = h.currentDir
-      const expected = {
+      const expected = Object.assign(Object.create(null), {
         '.': ['change.txt', 'subdir', 'unlink.txt'],
         '..': [h.testId.toString()],
         subdir: []
-      }
+      })
       await h.mkdir(h.dpath('subdir'))
       const watcher = h.cwatch(h.currentDir, options)
       await h.waitForWatcher(watcher)
@@ -2906,11 +2907,14 @@ function registerSharedSuite(s, baseopts, label) {
     await h.waitForWatcher(watcher)
 
     const closers = h.internals(watcher).closers
-    const dirHasCloser = () =>
-      [...closers.keys()].some((key) => sp.resolve(key) === sp.resolve(watchedDir))
+    const dirClosers = () =>
+      [...closers.entries()]
+        .filter(([key]) => sp.resolve(key) === sp.resolve(watchedDir))
+        .flatMap(([, entries]) => entries)
+    const original = dirClosers()
 
     // Sanity check: the watched directory has a registered fs.watch closer.
-    t.ok(dirHasCloser(), 'expected a closer to be registered for the watched directory')
+    t.ok(original.length > 0, 'expected a closer to be registered for the watched directory')
 
     const unlinkDirSpy = h.createSpy(function unlinkDirSpy() {})
     watcher.on(EV.UNLINK_DIR, unlinkDirSpy)
@@ -2920,7 +2924,11 @@ function registerSharedSuite(s, baseopts, label) {
 
     // The closer must have been invoked and removed; otherwise the underlying
     // fs.watch handle is leaked and keeps firing events on the deleted path.
-    t.ok(!dirHasCloser(), 'fs.watch handle of the deleted watched directory was leaked')
+    // (The root may be re-armed with a new wait from its parent.)
+    t.ok(
+      !dirClosers().some((closer) => original.includes(closer)),
+      'fs.watch handle of the deleted watched directory was leaked'
+    )
   })
 
   // ------------------------------------------------------------------------------------------
@@ -3028,4 +3036,274 @@ function registerSharedSuite(s, baseopts, label) {
     t.is(watcher.close(), closePromise)
     await closePromise
   })
+
+  // chokidar 6.0.0 additions (upstream index.test.ts, by describe).
+
+  s.test(
+    title(
+      'watch individual files',
+      'should detect unlink and re-add even if ignored matches the parent (#1374)'
+    ),
+    async (t, h) => {
+      const options = clean(h)
+      const { EV } = h
+      options.ignoreInitial = true
+      options.ignored = (path) => !path.endsWith('.js')
+      const unlinkSpy = h.createSpy(function unlinkSpy() {})
+      const addSpy = h.createSpy(function addSpy() {})
+      const testPath = h.dpath('unlink.js')
+      await write(testPath, 'b')
+      const watcher = h.cwatch(testPath, options).on(EV.UNLINK, unlinkSpy).on(EV.ADD, addSpy)
+      await h.waitForWatcher(watcher)
+
+      await h.delay()
+      await unlink(testPath)
+      await h.waitFor([[unlinkSpy, 1, [testPath]]])
+
+      await h.delay()
+      await write(testPath, 're-added')
+      await h.waitFor([[addSpy, 1, [testPath]]])
+    }
+  )
+
+  s.test(
+    title('watch individual files', 'should not error on sockets (#1391)'),
+    { skip: isWindows },
+    async (t, h) => {
+      const options = clean(h)
+      const { EV } = h
+      const net = isBare ? require('bare-net') : require('net')
+      const listenSocket = (path) =>
+        new Promise((resolve, reject) => {
+          const server = net.createServer()
+          server.once('error', reject)
+          server.listen(path, () => resolve(server))
+        })
+      const socketPath = h.dpath('a.sock')
+      const realSocketPath = h.dpath('real.sock')
+      const linkPath = h.dpath('link.sock')
+      const filePath = h.dpath('change.txt')
+      const servers = await Promise.all([listenSocket(socketPath), listenSocket(realSocketPath)])
+      try {
+        await symlink(realSocketPath, linkPath)
+        for (const watched of [h.currentDir, socketPath, linkPath]) {
+          const errorSpy = h.createSpy()
+          const watcher = h.cwatch(watched, options).on(EV.ERROR, errorSpy)
+          const spy = await h.aspy(watcher, EV.ALL)
+          t.ok(h.calledWith(spy, [EV.ADD, watched === h.currentDir ? linkPath : watched]))
+          if (watched === h.currentDir) {
+            await write(filePath, h.time())
+            await h.waitFor([[spy, 1, [EV.CHANGE, filePath]]])
+          }
+          await watcher.close()
+          t.alike(errorSpy.calls, [])
+        }
+      } finally {
+        await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))))
+      }
+    }
+  )
+
+  s.test(
+    title(
+      'watch non-existent paths',
+      'should watch non-existent file even if ignored matches its parent (#1374)'
+    ),
+    async (t, h) => {
+      const options = clean(h)
+      const { EV } = h
+      const testPath = h.dpath('add.js')
+      const siblingPath = h.dpath('sibling.txt')
+      options.ignored = (path) => !path.endsWith('.js')
+      const watcher = h.cwatch(testPath, options)
+      const spy = await h.aspy(watcher, EV.ALL)
+
+      await h.delay()
+      await write(siblingPath, h.time())
+      await write(testPath, h.time())
+      await h.waitFor([[spy, 1, [EV.ADD, testPath]]])
+      t.is(h.calledWith(spy, [EV.ADD, siblingPath]), false)
+    }
+  )
+
+  s.test(
+    title(
+      'watch non-existent paths',
+      'should watch non-existent file even if ignored matches directories (#1374)'
+    ),
+    async (t, h) => {
+      const options = clean(h)
+      const { EV } = h
+      const testPath = h.dpath('add.txt')
+      options.ignored = (_path, stats) => !!stats?.isDirectory()
+      const watcher = h.cwatch(testPath, options)
+      const spy = await h.aspy(watcher, EV.ADD)
+
+      await h.delay()
+      await write(testPath, h.time())
+      await h.waitFor([[spy, 1, [testPath]]])
+    }
+  )
+
+  s.test(
+    title(
+      'watch non-existent paths',
+      'should watch non-existent nested file even if ignored matches its ancestors'
+    ),
+    async (t, h) => {
+      const options = clean(h)
+      const { EV } = h
+      const testDir = h.dpath('subdir/nested')
+      const testPath = sp.join(testDir, 'add.js')
+      options.ignored = (path) => !path.endsWith('.js')
+      const watcher = h.cwatch(testPath, options)
+      const spy = await h.aspy(watcher, EV.ADD)
+
+      await h.delay()
+      await h.mkdir(testDir, { recursive: true })
+      await h.delay()
+      await write(sp.join(testDir, 'sibling.txt'), h.time())
+      await write(testPath, h.time())
+      await h.waitFor([[spy, 1, [testPath]]])
+      t.is(h.calledWith(spy, [sp.join(testDir, 'sibling.txt')]), false)
+    }
+  )
+
+  s.test(
+    title(
+      'watch non-existent paths',
+      'should still ignore a non-existent path that itself matches ignored'
+    ),
+    async (t, h) => {
+      const options = clean(h)
+      const { EV } = h
+      const testPath = h.dpath('add.txt')
+      options.ignored = (path) => path.endsWith('.txt')
+      const watcher = h.cwatch(testPath, options)
+      const spy = await h.aspy(watcher, EV.ADD)
+
+      await h.delay()
+      await write(testPath, h.time())
+      await h.delay(300)
+      t.is(spy.called, false)
+    }
+  )
+
+  s.test(
+    title('ignored', 'should not ignore a nested file that shares an ignored top-level name'),
+    async (t, h) => {
+      const options = clean(h)
+      const { EV } = h
+      const nestedFile = h.dpath('subdir/add.txt')
+      options.ignored = h.dpath('add.txt')
+      await h.mkdir(h.dpath('subdir'))
+      await write(h.dpath('add.txt'), 'a')
+      await write(nestedFile, 'b')
+      const watcher = h.cwatch(h.currentDir, options)
+      const spy = await h.aspy(watcher, EV.ALL)
+
+      t.ok(h.calledWith(spy, [EV.ADD, nestedFile]))
+      t.is(h.calledWith(spy, [EV.ADD, h.dpath('add.txt')]), false)
+    }
+  )
+
+  s.test(
+    title('ignored', 'should ignore unlink of a file ignored by real path under a symlinked root'),
+    { skip: isWindows },
+    async (t, h) => {
+      const options = clean(h)
+      const { EV } = h
+      const alias = `${h.currentDir}-alias`
+      const aliasFile = sp.join(alias, 'ignored.txt')
+      await write(h.dpath('ignored.txt'), 'b')
+      options.ignored = sp.join(await realpath(h.currentDir), 'ignored.txt')
+      await symlink(h.currentDir, alias, 'dir')
+      let watcher
+      try {
+        watcher = h.cwatch(alias, options)
+        const spy = await h.aspy(watcher, EV.ALL)
+
+        await unlink(h.dpath('ignored.txt'))
+        await h.delay(300)
+        t.is(h.calledWith(spy, [EV.ADD, aliasFile]), false)
+        t.is(h.calledWith(spy, [EV.UNLINK, aliasFile]), false)
+      } finally {
+        await watcher?.close()
+        await unlink(alias)
+      }
+    }
+  )
+
+  for (const relative of [true, false]) {
+    s.test(
+      title(
+        'getWatched',
+        `should list a __proto__ directory with ${relative ? 'cwd' : 'absolute'} keys`
+      ),
+      async (t, h) => {
+        const options = clean(h)
+        const names = ['__proto__', 'constructor', 'hasOwnProperty', 'toString']
+        for (const name of names) await h.mkdir(h.dpath(name))
+        await write(h.dpath('__proto__/b.txt'), 'b')
+        await write(h.dpath('__proto__/a.txt'), 'a')
+        if (relative) options.cwd = h.currentDir
+        const watcher = h.cwatch(h.currentDir, options)
+        await h.waitForWatcher(watcher)
+
+        const watched = watcher.getWatched()
+        const key = (name) => (relative ? name : h.dpath(name))
+        t.is(Object.getPrototypeOf(watched), null)
+        t.ok(Object.hasOwn(watched, key('__proto__')))
+        t.alike(watched[key('__proto__')], ['a.txt', 'b.txt'])
+        for (const name of names.slice(1)) t.alike(watched[key(name)], [])
+        const json = JSON.parse(JSON.stringify(watched))
+        t.ok(Object.hasOwn(json, key('__proto__')))
+        t.alike(json[key('__proto__')], ['a.txt', 'b.txt'])
+        t.alike(
+          watched[relative ? '.' : h.currentDir],
+          [...names, 'change.txt', 'unlink.txt'].sort()
+        )
+      }
+    )
+  }
+
+  s.test(
+    title('unwatch', 'should not create directory entries when unwatching an untracked path'),
+    async (t, h) => {
+      const options = clean(h)
+      const watcher = h.cwatch(h.currentDir, options)
+      await h.waitForWatcher(watcher)
+      const untrackedDir = h.dpath('never-watched')
+
+      watcher.unwatch(sp.join(untrackedDir, 'file.txt'))
+      t.is(h.internals(watcher).watched.has(h.internals(watcher).logicalKey(untrackedDir)), false)
+    }
+  )
+
+  s.test(
+    title(
+      'reproduction of bug in issue #1184',
+      'should not emit unlink events when watching the filesystem root'
+    ),
+    // Stat-ing system files at a Windows drive root can fail with EBUSY; a
+    // POSIX root has the same empty basename, so it covers the bug.
+    { skip: isWindows },
+    async (t, h) => {
+      const options = clean(h)
+      const { EV } = h
+      options.depth = 0
+      options.ignoreInitial = true
+      // sp.parse(cwd).root; bare-path has no parse()
+      let root = rt.cwd()
+      while (sp.dirname(root) !== root) root = sp.dirname(root)
+      const watcher = h.cwatch(root, options)
+      const spy = h.createSpy()
+      watcher.on(EV.ALL, (event, path) => {
+        if (event === EV.UNLINK || event === EV.UNLINK_DIR) spy(event, path)
+      })
+      await h.waitForWatcher(watcher)
+      await h.delay(300)
+      t.alike(spy.calls, [])
+    }
+  )
 }

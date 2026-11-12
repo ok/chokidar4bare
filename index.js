@@ -34,6 +34,14 @@ const DOT_RE = /\..*\.(sw[px])$|~$|\.subl.*\.tmp/
 const WATCH_BACKENDS = new Set(['auto', 'native', 'native-recursive', 'polling'])
 const DEF_AWF = Object.freeze({ stabilityThreshold: 2000, pollInterval: 100 })
 
+function* ancestorKeys(path) {
+  let current = sp.resolve(path)
+  for (let parent = sp.dirname(current); parent !== current; parent = sp.dirname(parent)) {
+    yield logicalPathKey(parent)
+    current = parent
+  }
+}
+
 function arrify(item) {
   return Array.isArray(item) ? item : [item]
 }
@@ -121,6 +129,9 @@ class FSWatcher extends EventEmitter {
   #pathBarriers
   #closePromise
   #userIgnored
+  #realDirs
+  #roots
+  #rootAncestors
   #unwatchIgnored
   #readyPending
   #readyScheduled
@@ -139,6 +150,9 @@ class FSWatcher extends EventEmitter {
     this.#pendingAdds = new Map()
     this.#pathMutation = 0
     this.#pathBarriers = new Map()
+    this.#realDirs = new Map()
+    this.#roots = new Set()
+    this.#rootAncestors = new Map()
     this.readyEmitted = false
     this.#readyPending = false
     this.#readyScheduled = false
@@ -333,6 +347,7 @@ class FSWatcher extends EventEmitter {
 
     paths.forEach((path) => {
       this.removeIgnoredPath(path)
+      this.addRootAncestors(path)
     })
 
     if (!this.readyEmitted) this.#readyPending = true
@@ -370,6 +385,7 @@ class FSWatcher extends EventEmitter {
       const isDirectory = this.tree.watched.has(key)
 
       this.invalidatePath(key)
+      this.removeRootAncestors(key)
       this.#pendingAdds.delete(key)
       this.events.cancelPath(key)
       this.closePath(key, isDirectory)
@@ -401,6 +417,8 @@ class FSWatcher extends EventEmitter {
     this.removeAllListeners()
     this.events.close()
     this.#pendingAdds.clear()
+    this.#roots.clear()
+    this.#rootAncestors.clear()
     this.streams.forEach((stream) => stream.destroy())
     this.#userIgnored = undefined
     this.#unwatchIgnored = undefined
@@ -409,6 +427,7 @@ class FSWatcher extends EventEmitter {
     this.#pathBarriers.clear()
     this.streams.clear()
     this.reconciliation.clear()
+    this.#realDirs.clear()
 
     this.#closePromise = (async () => {
       const closerResults = await Promise.allSettled(closers)
@@ -421,11 +440,11 @@ class FSWatcher extends EventEmitter {
   }
 
   /**
-   * Expose list of watched paths
-   * @returns for chaining
+   * Expose list of watched paths. The result has a null prototype, so a
+   * directory named `__proto__` is an ordinary own key.
    */
   getWatched() {
-    const watchList = {}
+    const watchList = Object.create(null)
     this.tree.watched.forEach((entry) => {
       const dir = entry.path
       const key = this.options.cwd ? sp.relative(this.options.cwd, dir) : dir
@@ -487,36 +506,73 @@ class FSWatcher extends EventEmitter {
         (matcher) => typeof matcher === 'string' || isMatcherObject(matcher)
       )
       const canonical = compileMatchers(pathMatchers)
-      const pathAliases = new Map()
       this.#userIgnored = (candidate, candidateStats) => {
         if (direct(candidate, candidateStats)) return true
         if (isWindows || pathMatchers.length === 0) return false
 
+        // macOS commonly exposes /var through the /private/var symlink. Resolve
+        // the containing directory (memoized per directory) instead of the
+        // path itself, so files that no longer exist still project correctly.
         const absoluteCandidate = sp.resolve(candidate)
-        for (const [alias, realPath] of pathAliases) {
-          const relative = sp.relative(alias, absoluteCandidate)
-          if (isSameOrInside(alias, absoluteCandidate)) {
-            return canonical(sp.join(realPath, relative), candidateStats)
-          }
+        let realPath
+        if (candidateStats?.isDirectory()) {
+          realPath = this.realDirectory(absoluteCandidate)
+        } else {
+          const realDir = this.realDirectory(sp.dirname(absoluteCandidate))
+          if (realDir !== undefined) realPath = sp.join(realDir, sp.basename(absoluteCandidate))
         }
-        try {
-          // macOS commonly exposes /var through the /private/var symlink. Cache
-          // the root projection so descendants avoid a realpath syscall each.
-          const realPath = rt.realpathNative(absoluteCandidate) // rt: S12
-          pathAliases.set(absoluteCandidate, realPath)
-          return realPath !== absoluteCandidate && canonical(realPath, candidateStats)
-        } catch {
-          return false
-        }
+        return (
+          realPath !== undefined &&
+          realPath !== absoluteCandidate &&
+          canonical(realPath, candidateStats)
+        )
       }
     }
-    if (this.#userIgnored(path, stats)) return true
+    // Directories above a watched path stay watchable, so a missing path can be
+    // observed through its parent (#1374). Their other contents are still filtered.
+    if (this.#userIgnored(path, stats) && !this.isRootAncestor(path, stats)) return true
     if (this.#ignoredPaths.size === 0) return false
     if (!this.#unwatchIgnored) {
       this.#unwatchIgnored = compileMatchers([...this.#ignoredPaths])
     }
 
     return this.#unwatchIgnored(logicalPathKey(path), stats)
+  }
+
+  isRootAncestor(path, stats) {
+    // Regular files are never ancestors; skip the resolve on the hot scan path.
+    if (stats?.isFile()) return false
+    return this.#rootAncestors.has(logicalPathKey(path))
+  }
+
+  /** Records every directory above a requested root; refcounted across roots. */
+  addRootAncestors(path) {
+    const key = logicalPathKey(path)
+    if (this.#roots.has(key)) return
+    this.#roots.add(key)
+    for (const ancestor of ancestorKeys(path)) {
+      this.#rootAncestors.set(ancestor, (this.#rootAncestors.get(ancestor) ?? 0) + 1)
+    }
+  }
+
+  removeRootAncestors(path) {
+    if (!this.#roots.delete(logicalPathKey(path))) return
+    for (const ancestor of ancestorKeys(path)) {
+      const count = (this.#rootAncestors.get(ancestor) ?? 1) - 1
+      if (count > 0) this.#rootAncestors.set(ancestor, count)
+      else this.#rootAncestors.delete(ancestor)
+    }
+  }
+
+  realDirectory(directory) {
+    const key = logicalPathKey(directory)
+    if (this.#realDirs.has(key)) return this.#realDirs.get(key)
+    let realPath
+    try {
+      realPath = rt.realpathNative(directory) // rt: S12
+    } catch {}
+    this.#realDirs.set(key, realPath)
+    return realPath
   }
 
   isUnwatched(path) {
@@ -539,16 +595,17 @@ class FSWatcher extends EventEmitter {
   }
 
   removeTreeItem(directory, item) {
-    const entry = this.tree.getDirectory(directory)
-    if (!entry.remove(item)) return
+    const entry = this.tree.peekDirectory(directory)
+    if (!entry?.remove(item)) return
     const path = entry.path
     const generation = this.lifecycle.generation
     this.lifecycle.track(
       (async () => {
         try {
           await readdir(path)
-        } catch {
-          if (this.lifecycle.isActive(generation)) {
+        } catch (error) {
+          // Only a missing directory is gone; an unreadable one still exists.
+          if (isMissingError(error) && this.lifecycle.isActive(generation)) {
             this.removePath(sp.dirname(path), sp.basename(path))
           }
         }
@@ -574,28 +631,16 @@ class FSWatcher extends EventEmitter {
     const logicalKey = logicalPathKey(path)
     isDirectory = isDirectory != null ? isDirectory : this.tree.watched.has(logicalKey) // lunte-disable-line eqeqeq
 
-    // prevent duplicate handling in case of arriving here nearly simultaneously
-    // via multiple paths (such as handleFile and handleDirectory)
-    if (!this.events.throttle('remove', path, 100)) return
-
-    // if the only watched file is removed, watch for its return
-    if (!isDirectory && this.tree.watched.size === 1) {
-      this.lifecycle.track(
-        this.handler.addRoot(directory, false, this.capturePathGeneration(), item)
-      )
-    }
-
-    // This will create a new entry in the watched object in either case
-    // so we got to do the directory check beforehand
-    const wp = this.tree.getDirectory(path)
-    const nestedDirectoryChildren = wp.getChildren()
+    // Removal is idempotent: a second caller finds nothing tracked and emits
+    // nothing, while a path re-added in between is truthfully removed again.
 
     // Recursively remove children directories / files.
-    nestedDirectoryChildren.forEach((nested) => this.removePath(path, nested))
+    const nestedDirectoryChildren = this.tree.peekDirectory(path)?.getChildren() ?? []
+    for (const nested of nestedDirectoryChildren) this.removePath(path, nested)
 
     // Check if item was on the watched list and remove it
-    const parent = this.tree.getDirectory(directory)
-    const wasTracked = parent.has(item)
+    const wasTracked = this.tree.peekDirectory(directory)?.has(item) ?? false
+    const hadClosers = this.lifecycle.closers.has(logicalKey)
     this.removeTreeItem(directory, item)
 
     // Fixes issue #1042 -> Relative paths were detected and added as symlinks
@@ -615,8 +660,7 @@ class FSWatcher extends EventEmitter {
       suppressEvent = event === EV.ADD
     }
 
-    // The Entry will either be a directory that just got removed
-    // or a bogus entry to a file, in either case we have to remove it
+    // Drop the entry if what got removed was a watched directory
     this.tree.watched.delete(logicalKey)
     this.tree.observed.delete(logicalKey)
     const eventName = isDirectory ? EV.UNLINK_DIR : EV.UNLINK
@@ -624,6 +668,9 @@ class FSWatcher extends EventEmitter {
 
     // Avoid conflicts if we later create another file with the same name
     this.closePath(path)
+
+    // A requested root that disappears is awaited from its nearest existing ancestor.
+    if ((wasTracked || hadClosers) && this.#roots.has(logicalKey)) this.rewatchMissingPath(path)
   }
 
   /**
@@ -647,26 +694,36 @@ class FSWatcher extends EventEmitter {
       if (!recursive) return false
       return isStrictlyInside(logicalKey, candidate)
     }
+    // Snapshot closers: closing one may register or drop others.
     ;[...this.lifecycle.closers.keys()].filter(contains).forEach((key) => this.closeFile(key))
+    // Resolutions at or below a closed directory may be stale. Only directories
+    // are cached, so file closes stay O(1). Deleting the current key while
+    // iterating a Map is safe.
+    if (this.#realDirs.delete(logicalKey) || recursive) {
+      const prefix = logicalKey.endsWith('/') ? logicalKey : `${logicalKey}/`
+      for (const key of this.#realDirs.keys()) {
+        if (key.startsWith(prefix)) this.#realDirs.delete(key)
+      }
+    }
     if (recursive) {
-      ;[...this.tree.watched.entries()].forEach(([key, entry]) => {
-        if (!contains(key)) return
+      for (const [key, entry] of this.tree.watched) {
+        if (!contains(key)) continue
         entry.dispose()
         this.tree.watched.delete(key)
-      })
-      ;[...this.tree.observed.keys()]
-        .filter(contains)
-        .forEach((key) => this.tree.observed.delete(key))
-      ;[...this.tree.symlinkPaths.keys()]
-        .filter(contains)
-        .forEach((key) => this.tree.symlinkPaths.delete(key))
+      }
+      for (const key of this.tree.observed.keys()) {
+        if (contains(key)) this.tree.observed.delete(key)
+      }
+      for (const key of this.tree.symlinkPaths.keys()) {
+        if (contains(key)) this.tree.symlinkPaths.delete(key)
+      }
       this.events.cancelWhere(contains)
       this.reconciliation.forgetPending(
         (scope, candidate) => contains(scope) || contains(candidate)
       )
-      ;[...this.#pendingAdds.keys()]
-        .filter(contains)
-        .forEach((key) => this.#pendingAdds.delete(key))
+      for (const key of this.#pendingAdds.keys()) {
+        if (contains(key)) this.#pendingAdds.delete(key)
+      }
     }
     const dir = sp.dirname(logicalKey)
     this.removeTreeItem(dir, sp.basename(logicalKey))

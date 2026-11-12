@@ -3406,4 +3406,85 @@ s.test(
   }
 )
 
+s.test(
+  'race regressions › should report every removal of a path recreated within 100 ms',
+  async (t, h) => {
+    const { chokidar, EV, internals } = h
+    await h.mkdir(h.currentDir, { recursive: true })
+    for (const atomic of [false, true]) {
+      const scheduler = new VirtualScheduler()
+      const watcher = new chokidar.FSWatcher({ atomic }, scheduler)
+      h.WATCHERS.push(watcher)
+      const file = h.dpath(`removed-twice-${atomic}.txt`)
+      const name = sp.basename(file)
+      const allSpy = h.createSpy()
+      watcher.on(EV.ALL, allSpy)
+      await write(file, 'first')
+      internals(watcher).directoryEntry(h.currentDir).add(name)
+
+      await unlink(file)
+      internals(watcher).removePath(h.currentDir, name)
+      await write(file, 'second')
+      internals(watcher).handler.handleFile(file, await lstat(file), false, false)
+      await unlink(file)
+      internals(watcher).removePath(h.currentDir, name)
+      scheduler.advanceBy(100)
+
+      t.is(internals(watcher).directoryEntry(h.currentDir).has(name), false)
+      t.alike(
+        allSpy.calls.map(([event]) => event),
+        atomic ? [EV.CHANGE, EV.UNLINK] : [EV.UNLINK, EV.ADD, EV.UNLINK]
+      )
+    }
+  }
+)
+
+s.test(
+  'race regressions › should watch a deleted root file for its return while other directories are tracked',
+  async (t, h) => {
+    const { EV } = h
+    await h.mkdir(h.dpath('first'), { recursive: true })
+    await h.mkdir(h.dpath('second'), { recursive: true })
+    for (const options of [{ backend: 'native' }, { backend: 'polling', pollingInterval: 10 }]) {
+      const returning = h.dpath(`first/returning-${options.backend}.txt`)
+      const other = h.dpath(`second/other-${options.backend}.txt`)
+      await write(returning, 'one')
+      await write(other, 'two')
+      const watcher = h.cwatch([returning, other], {
+        ...options,
+        ignoreInitial: true,
+        atomic: false
+      })
+      await h.waitForWatcher(watcher)
+      const unlinkSpy = h.createSpy()
+      const addSpy = h.createSpy()
+      watcher.on(EV.UNLINK, unlinkSpy).on(EV.ADD, addSpy)
+
+      await unlink(returning)
+      await h.waitFor([[unlinkSpy, 1, [returning]]])
+      await write(returning, 'back')
+      await h.waitFor([[addSpy, 1, [returning]]])
+      await watcher.close()
+    }
+  }
+)
+
+s.test('race regressions › should watch a deleted root directory for its return', async (t, h) => {
+  const { EV } = h
+  const root = h.dpath('returning-root')
+  await h.mkdir(root, { recursive: true })
+  const watcher = h.cwatch(root, { ignoreInitial: true, atomic: false })
+  await h.waitForWatcher(watcher)
+  const unlinkDirSpy = h.createSpy()
+  const addSpy = h.createSpy()
+  watcher.on(EV.UNLINK_DIR, unlinkDirSpy).on(EV.ADD, addSpy)
+
+  await h.rmr(root)
+  await h.waitFor([[unlinkDirSpy, 1, [root]]])
+  await h.mkdir(root)
+  const after = sp.join(root, 'after.txt')
+  await write(after, 'after')
+  await h.waitFor([[addSpy, 1, [after]]])
+})
+
 s.run()
