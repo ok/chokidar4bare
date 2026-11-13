@@ -52,9 +52,11 @@ s.test(
     // per-directory handle: close it ourselves, then emit the error it would have emitted.
     const { backendTesting } = h
     const created = []
+    const createdPaths = []
     const system = (p, opts, listener) => {
       const w = fs.watch(p, opts, listener)
       created.push(w)
+      createdPaths.push(p)
       return w
     }
     backendTesting.setNativeWatchFactory(system)
@@ -62,9 +64,14 @@ s.test(
     const watcher = h.cwatch(h.currentDir, { ignoreInitial: true, backend: 'native' })
     const events = collect(watcher)
     await h.waitForWatcher(watcher)
-    t.ok(created.length >= 1, 'the root handle went through the factory')
-    const handle = created[0]
+    // On Windows the root's parent is watched too (watchRootParent), and first: pick the
+    // root's own handle by its path, not by creation order.
+    const rootName = path.basename(h.currentDir).toLowerCase()
+    const index = createdPaths.findIndex((p) => path.basename(p).toLowerCase() === rootName)
+    t.ok(index !== -1, 'the root handle went through the factory')
+    const handle = created[index]
     const before = facts().nativeWatches
+    const createdBefore = created.length
     handle.close() // what bare-fs does first
     const err = Object.assign(new Error('EPERM: simulated backend failure'), { code: 'EPERM' })
     handle.emit('error', err) // …then this
@@ -73,8 +80,8 @@ s.test(
     t.is(events.find(([e]) => e === 'error')[1].code, 'EPERM')
     // chokidar 6.0.0: a retired handle is re-established (at most 3 times) and its path
     // reconciled, so the registry holds a fresh handle instead of the failed one.
-    t.ok(created.length >= 2 && created.at(-1) !== handle, 'a fresh handle replaced the failed one')
-    t.is(facts().nativeWatches, before, 'the failed resource left the registry')
+    t.ok(created.length > createdBefore, 'a fresh handle replaced the failed one')
+    t.is(facts().nativeWatches, before, 'the registry holds as many handles as before')
     const addSpy = h.createSpy()
     watcher.on('add', addSpy)
     const file = path.join(h.currentDir, 'after-failure.txt')
