@@ -1,6 +1,6 @@
 {
   "name": "chokidar4bare",
-  "version": "0.1.0",
+  "version": "6.0.0",
   "description": "A faithful port of chokidar to the Bare runtime",
   "keywords": [
     "chokidar",
