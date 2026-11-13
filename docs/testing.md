@@ -41,22 +41,22 @@ Linux arm64 in Docker `node:22-slim`, Node 22.23, Bare 1.33.4):
 
 chokidar4bare's own suites (`read-dir`, `bare-facts`, `bare-hardening`, `scaffold`, `smoke`,
 `enospc`) also pass on Linux under both runtimes, as does `scripts/linux-enospc.sh` with the lowered
-limits. Windows has not been run since the sync (CI). The 0.1.0 baseline (2026-09-25, `74adf65`) was
+limits. Windows is covered by CI (below). The 0.1.0 baseline (2026-09-25, `74adf65`) was
 75 v6 cases and 359 index cases (240 on Linux under Bare).
 
 On Linux under Bare the recursive-preferred label does not register (264 = 2 × 131 + 2; 2 × 119 + 2 at
 0.1.0): libuv ignores the recursive flag there and bare-fs cannot report it, so chokidar4bare pre-latches recursive
 as unsupported (DV11) and the harness's `canUseRecursiveWatch` says no.
 
-## CI (2026-09-25, `ok/chokidar4bare`, `.github/workflows/integrate.yml`)
+## CI (`ok/chokidar4bare`, `.github/workflows/integrate.yml`)
 
-| Job                                                                    | Result (run 36181023033, `4076026`, bare-fs 4.8.2)                          |
-| ---------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Test / linux (Node + Bare)                                             | green                                                                       |
-| Test / linux inotify limits (`test/enospc.js` with the limits lowered) | green                                                                       |
-| Test / win32 (Node + Bare)                                             | green: Bare 478/478 (1,163 asserts), Node 478/478 — burst test and F15 live |
-| Test / darwin (Node + Bare)                                            | green: Bare 478/478 (1,316), Node 478/478                                   |
-| Lint, Security                                                         | green                                                                       |
+| Job                                                                    | 6.0.0 sync (run 43391148651, PR #1, `e4021d8`)            | 0.1.0 (run 36181023033, `4076026`, bare-fs 4.8.2)                           |
+| ---------------------------------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Test / linux (Node + Bare)                                             | green                                                     | green                                                                       |
+| Test / linux inotify limits (`test/enospc.js` with the limits lowered) | green                                                     | green                                                                       |
+| Test / win32 (Node + Bare)                                             | green: Bare 539/539 (1,290 asserts), Node 539/539 (1,318) | green: Bare 478/478 (1,163 asserts), Node 478/478 — burst test and F15 live |
+| Test / darwin (Node + Bare)                                            | green                                                     | green: Bare 478/478 (1,316), Node 478/478                                   |
+| Lint, Security                                                         | green                                                     | green                                                                       |
 
 Windows needed two things the local runs could not show: bare-fs 4.8.2 (before it, a burst
 overflowed libuv's 4 KB ReadDirectoryChangesW buffer, libuv passed a NULL filename and bare-fs
