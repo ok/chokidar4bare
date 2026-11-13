@@ -3,8 +3,8 @@
 chokidar4bare's suites are chokidar v6's own suites, ported to brittle. They are the executable
 specification of the port: `test/v6.js` (96 cases), `test/index.js` (the 131-case shared suite run
 under the native, recursive-preferred and owned-polling backends), `test/architecture.js` (7
-cases), plus chokidar4bare's own `test/read-dir.js`, `test/inotify.js`, `test/enospc.js` and
-`test/smoke.js`.
+cases), plus chokidar4bare's own `test/read-dir.js`, `test/bare-facts.js`, `test/bare-hardening.js`,
+`test/enospc.js`, `test/scaffold.js` and `test/smoke.js`.
 
 ## The oracle
 
@@ -29,22 +29,23 @@ Differences between 2 and 3 are confined to `lib/backend.js`, `lib/read-dir.js` 
 defences, and to cases marked `{ skip: isBare }` (they need `process.env`, `process.chdir`,
 `child_process` or `fs.watchFile`).
 
-Recorded numbers (2026-09-25, macOS arm64, Node 24.19, Bare 1.33.4):
+Recorded numbers at the 6.0.0 sync (`e4021d8`, 2026-11-13; macOS arm64, Node 24.19, Bare 1.33.4;
+Linux arm64 in Docker `node:22-slim`, Node 22.23, Bare 1.33.4):
 
-| Suite                  | oracle (Node)      | chokidar4bare (Node) | chokidar4bare (Bare, macOS) | chokidar4bare (Bare, Linux) |
-| ---------------------- | ------------------ | -------------------- | --------------------------- | --------------------------- |
-| `test/v6.js`           | 75/75, 268 asserts | 75/75, 268           | 75/75, 253                  | 75/75, 246                  |
-| `test/index.js`        | 359/359, 988       | 359/359, 988         | 359/359, 952                | 240/240, 641                |
-| `test/architecture.js` | 8/8, 35            | 8/8, 35              | 8/8, 35                     | 8/8, 35                     |
+| Suite                  | oracle (Node, macOS) | chokidar4bare (Node, macOS) | (Bare, macOS)  | (Node, Linux)  | (Bare, Linux) |
+| ---------------------- | -------------------- | --------------------------- | -------------- | -------------- | ------------- |
+| `test/v6.js`           | 97/97, 316 asserts   | 97/97, 316                  | 97/97, 301     | 97/97, 312     | 97/97, 287    |
+| `test/index.js`        | 395/395, 1,087       | 395/395, 1,087              | 395/395, 1,051 | 395/395, 1,095 | 264/264, 707  |
+| `test/architecture.js` | 8/8, 35              | 8/8, 35                     | 8/8, 35        | 8/8, 35        | 8/8, 35       |
+| all of `test/*.js`     | 539/539, 1,502       | 539/539, 1,502              | 539/539, 1,472 |                |               |
 
-Synced to chokidar 6.0.0 + #1496/#1505 (`e4021d8`), 2026-11-12, macOS arm64, Node 24.19, Bare
-1.33.4: `npm test` gives 539/539 under Node (1,502 asserts) and 539/539 under Bare (1,472 asserts);
-`test/v6.js` alone is 97/97 (316 asserts Node, 301 Bare). The oracle column has not been re-run at
-`e4021d8` yet, nor have Linux and Windows; the table above is the 0.1.0 baseline.
+chokidar4bare's own suites (`read-dir`, `bare-facts`, `bare-hardening`, `scaffold`, `smoke`,
+`enospc`) also pass on Linux under both runtimes, as does `scripts/linux-enospc.sh` with the lowered
+limits. Windows has not been run since the sync (CI). The 0.1.0 baseline (2026-09-25, `74adf65`) was
+75 v6 cases and 359 index cases (240 on Linux under Bare).
 
-On Linux under Bare the recursive-preferred label does not register (240 = 2 × 119 + 2 at 0.1.0;
-2 × 131 + 2 since 6.0.0): libuv
-ignores the recursive flag there and bare-fs cannot report it, so chokidar4bare pre-latches recursive
+On Linux under Bare the recursive-preferred label does not register (264 = 2 × 131 + 2; 2 × 119 + 2 at
+0.1.0): libuv ignores the recursive flag there and bare-fs cannot report it, so chokidar4bare pre-latches recursive
 as unsupported (DV11) and the harness's `canUseRecursiveWatch` says no.
 
 ## CI (2026-09-25, `ok/chokidar4bare`, `.github/workflows/integrate.yml`)
