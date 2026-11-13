@@ -1,4 +1,4 @@
-// lib/read-dir.js against readdirp 5.0.0 semantics, on both runtimes.
+// lib/read-dir.js against readdirp 5.1.1 semantics, on both runtimes.
 const test = require('brittle')
 const fs = require('fs')
 const path = require('path')
@@ -149,4 +149,44 @@ test('read-dir: validation matches readdirp', async (t) => {
   // a TypeError counts as "native" for brittle; .all() keeps it from being rethrown
   await t.exception.all(() => readDir(42), /must be a string/)
   await t.exception(() => readDir('.', { type: 'bogus' }), /Invalid type/)
+})
+
+test('pause() holds entries until resume(), like a paused Readable', async (t) => {
+  const root = await fixture(t)
+  const stream = readDir(root, { type: 'all' })
+  stream.pause()
+  t.is(stream.isPaused(), true)
+  const done = collect(stream)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  let seen = 0
+  stream.on('data', () => seen++)
+  t.is(seen, 0, 'nothing is emitted while paused')
+  stream.resume()
+  const events = await done
+  t.is(events.filter(([e]) => e === 'data').length, 5)
+  t.alike(events.slice(-2), [['end'], ['close']])
+})
+
+// readdirp 5.1.1 'options handling' (the highWaterMark cases have no counterpart here).
+test('does not mutate the passed options object', async (t) => {
+  const root = await tmp(t)
+  fs.writeFileSync(path.join(root, 'a.txt'), '1')
+  const options = Object.freeze({ type: 'both' })
+  const events = await collect(readDir(root, options))
+  t.is(events.filter(([e]) => e === 'data').length, 1)
+  t.is(options.root, undefined)
+  t.is(options.type, 'both')
+})
+
+test('treats explicitly undefined options as defaults', async (t) => {
+  const root = await tmp(t)
+  for (const name of ['a.txt', 'b.txt']) fs.writeFileSync(path.join(root, name), '1')
+  const events = await collect(
+    readDir(root, { type: undefined, root: undefined, fileFilter: undefined })
+  )
+  const names = events
+    .filter(([e]) => e === 'data')
+    .map(([, entry]) => entry.path)
+    .sort()
+  t.alike(names, ['a.txt', 'b.txt'])
 })

@@ -1,6 +1,6 @@
 {
   "name": "chokidar4bare",
-  "version": "0.1.0",
+  "version": "6.0.0",
   "description": "A faithful port of chokidar to the Bare runtime",
   "keywords": [
     "chokidar",
@@ -41,13 +41,18 @@
     "path": {
       "bare": "bare-path",
       "default": "path"
+    },
+    "timers": {
+      "bare": "./lib/bare-timers.js",
+      "default": "timers"
     }
   },
   "files": [
     "index.js",
     "index.d.ts",
     "lib",
-    "!lib/testing.js"
+    "!lib/testing.js",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "postinstall": "node -e \"const fs=require('fs');const p='node_modules/.bin/bare';try{if(!fs.existsSync(p))fs.symlinkSync('../bare-runtime/bin/bare',p)}catch{}\"",
@@ -72,6 +77,7 @@
     "bare-path": "^3.1.2"
   },
   "devDependencies": {
+    "bare-net": "^2.3.3",
     "bare-runtime": "^1.33.4",
     "brittle": "^4.2.0",
     "lunte": "^1.8.4",

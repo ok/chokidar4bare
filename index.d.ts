@@ -1,4 +1,4 @@
-// Derived from chokidar src/index.ts @ 74adf65 (https://github.com/paulmillr/chokidar, branch v6).
+// Derived from chokidar src/index.ts @ e4021d8 (https://github.com/paulmillr/chokidar, v6.0.0 + main).
 // MIT License. Copyright (c) 2012 Paul Miller (https://paulmillr.com), Elan Shanker.
 
 /*! chokidar - MIT License (c) 2012 Paul Miller (paulmillr.com) */

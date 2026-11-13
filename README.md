@@ -30,9 +30,10 @@ If chokidar has saved you time, please consider
 
 ## Status
 
-0.1.0 — the first release. The port of chokidar v6 (`74adf65`) is complete; its own test suites
-pass against chokidar4bare on macOS, Linux and Windows, under Bare and under Node (`docs/testing.md`
-has the numbers). Two bare-fs defects that limited a watcher under Bare — a failed `fs.watch()` returning a dead
+6.0.0 — ported from chokidar 6.0.0 plus #1496 and #1505 (`e4021d8`). The ported test suites match
+chokidar at that commit under Node and pass under Node and Bare on macOS and Linux
+(`docs/testing.md` has the numbers). chokidar4bare's major version follows chokidar's; minor and
+patch are its own (see [CHANGELOG.md](CHANGELOG.md)). Two bare-fs defects that limited a watcher under Bare — a failed `fs.watch()` returning a dead
 handle ([bare-fs#51](https://github.com/holepunchto/bare-fs/issues/51)) and a crash on a burst of
 changes on Windows ([bare-fs#52](https://github.com/holepunchto/bare-fs/issues/52)) — were fixed
 in bare-fs 4.8.2, which chokidar4bare requires. The reproductions live in

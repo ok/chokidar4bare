@@ -6,7 +6,7 @@ const path = require('path')
 
 const root = path.join(__dirname, '..')
 const DERIVED =
-  /^\/\/ Derived from chokidar src\/[a-z0-9.-]+ @ [0-9a-f]{7} \(https:\/\/github\.com\/paulmillr\/chokidar, branch v6\)\.$/m
+  /^\/\/ Derived from chokidar src\/[a-z0-9.-]+ @ [0-9a-f]{7} \(https:\/\/github\.com\/paulmillr\/chokidar, v6\.0\.0 \+ main\)\.$/m
 const ORIGINAL = /^\/\/ chokidar4bare original: .+$/m
 
 function sources() {
@@ -31,7 +31,7 @@ for (const file of sources()) {
 if (failed) {
   console.error(
     'Every file under lib/ and index.js must start with either\n' +
-      '  // Derived from chokidar src/<file> @ 74adf65 (https://github.com/paulmillr/chokidar, branch v6).\n' +
+      '  // Derived from chokidar src/<file> @ e4021d8 (https://github.com/paulmillr/chokidar, v6.0.0 + main).\n' +
       '  // MIT License. Copyright (c) 2012 Paul Miller (https://paulmillr.com), Elan Shanker.\n' +
       'or\n' +
       '  // chokidar4bare original: <one line saying what it is>'
