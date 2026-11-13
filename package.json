@@ -51,7 +51,8 @@
     "index.js",
     "index.d.ts",
     "lib",
-    "!lib/testing.js"
+    "!lib/testing.js",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "postinstall": "node -e \"const fs=require('fs');const p='node_modules/.bin/bare';try{if(!fs.existsSync(p))fs.symlinkSync('../bare-runtime/bin/bare',p)}catch{}\"",

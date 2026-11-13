@@ -8,7 +8,7 @@ chokidar's: an upstream sync that brings new features is a minor release, and ch
 fixes or an upstream sync that only brings fixes are patch releases. The exact chokidar commit each
 release is ported from is listed below and pinned in [UPSTREAM.md](UPSTREAM.md).
 
-## 6.0.0 (unreleased)
+## 6.0.0 (2026-11-13)
 
 Ported from chokidar **6.0.0** plus its two fixes after the release, #1496 and #1505 (`e4021d8`).
 
